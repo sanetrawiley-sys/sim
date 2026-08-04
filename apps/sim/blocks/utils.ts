@@ -18,6 +18,7 @@ import {
   getProviderIcon,
   getProviderModels,
   isAutoModel,
+  isModelVisibleInStandardAuthoring,
   orderModelIdsByReleaseDate,
   SIM_AUTO_MODEL_ID,
 } from '@/providers/models'
@@ -83,6 +84,7 @@ export function getModelOptions() {
   )
 
   const options = allModels
+    .filter(isModelVisibleInStandardAuthoring)
     .filter((model) => getModelSunsetStatus(model) !== 'deprecated')
     .map((model) => {
       const icon = getProviderIcon(model)

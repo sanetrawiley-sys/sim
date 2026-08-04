@@ -5,9 +5,12 @@ import type { StreamingExecution } from '@/executor/types'
 import {
   applyModelCostPolicy,
   applySegmentCostPolicy,
+  buildEstimatedProviderCost,
   calculateBillableModelCost,
   installStreamingCostPolicy,
+  LIST_PRICE_POLICY,
   type ModelCostPolicy,
+  priceModelUsage,
   resolveModelCostPolicy,
   withoutToolCost,
 } from '@/providers/cost-policy'
@@ -15,6 +18,7 @@ import {
   attachLargeFileRemoteUrls,
   uploadLargeFilesToProvider,
 } from '@/providers/file-attachments.server'
+import { getModelPricing, isCustomJsonOnlyModel } from '@/providers/models'
 import { getProviderExecutor } from '@/providers/registry'
 import {
   type ProviderRuntimeContext,
@@ -83,14 +87,18 @@ function isReadableStream(response: any): response is ReadableStream {
  * stream drain — long after this function returns — so the policy is installed
  * on the live output object rather than applied to a value.
  */
-function applyStreamingCostPolicy(response: StreamingExecution, policy: ModelCostPolicy): void {
+function applyStreamingCostPolicy(
+  response: StreamingExecution,
+  policy: ModelCostPolicy,
+  estimatedModel?: string
+): void {
   const output = response.execution?.output
   if (!output || typeof output !== 'object') {
     logger.warn('Streaming output unavailable at intercept time; cost policy not applied')
     return
   }
 
-  installStreamingCostPolicy(output, policy)
+  installStreamingCostPolicy(output, policy, estimatedModel)
 
   const segments = output.providerTiming?.timeSegments
   if (Array.isArray(segments)) {
@@ -103,6 +111,12 @@ export async function executeProviderRequest(
   request: ProviderRequest,
   runtimeContext?: ProviderRuntimeContext
 ): Promise<ProviderResponse | ReadableStream | StreamingExecution> {
+  if (isCustomJsonOnlyModel(request.model) && request.capabilityPolicy !== 'passthrough') {
+    throw new Error(
+      `${request.model} is available only through the Super User custom-model JSON configuration`
+    )
+  }
+
   const provider = await getProviderExecutor(providerId as ProviderId)
   if (!provider) {
     throw new Error(`Provider not found: ${providerId}`)
@@ -188,7 +202,11 @@ export async function executeProviderRequest(
 
   if (isStreamingExecution(response)) {
     logger.info('Provider returned StreamingExecution', { isBYOK })
-    applyStreamingCostPolicy(response, resolveModelCostPolicy(sanitizedRequest.model, isBYOK))
+    applyStreamingCostPolicy(
+      response,
+      resolveModelCostPolicy(sanitizedRequest.model, isBYOK),
+      sanitizedRequest.credentialMode === 'explicit' ? sanitizedRequest.model : undefined
+    )
     return response
   }
 
@@ -199,8 +217,17 @@ export async function executeProviderRequest(
 
   const costPolicy = resolveModelCostPolicy(response.model, isBYOK)
 
-  if (response.tokens) {
-    const { input: promptTokens = 0, output: completionTokens = 0 } = response.tokens
+  if (response.tokens || response.cost) {
+    const { input: promptTokens = 0, output: completionTokens = 0 } = response.tokens ?? {}
+    const rawModelCost = response.cost
+      ? withoutToolCost(response.cost)
+      : getModelPricing(response.model)
+        ? priceModelUsage(
+            response.model,
+            { input: promptTokens, output: completionTokens },
+            LIST_PRICE_POLICY
+          )
+        : undefined
 
     /**
      * Any provider that reports cache buckets also prices itself, because only
@@ -212,9 +239,13 @@ export async function executeProviderRequest(
      * Tool cost is stripped either way: it is re-derived from `toolResults`
      * below and must not be counted twice.
      */
-    response.cost = response.cost
-      ? (applyModelCostPolicy(withoutToolCost(response.cost), costPolicy) as typeof response.cost)
+    response.cost = rawModelCost
+      ? (applyModelCostPolicy(rawModelCost, costPolicy) as typeof response.cost)
       : calculateBillableModelCost(response.model, promptTokens, completionTokens, { isBYOK })
+
+    if (sanitizedRequest.credentialMode === 'explicit' && rawModelCost) {
+      response.estimatedProviderCost = buildEstimatedProviderCost(response.model, rawModelCost)
+    }
 
     if (!costPolicy.billable) {
       logger.info(
