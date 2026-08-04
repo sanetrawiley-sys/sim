@@ -386,7 +386,7 @@ describe('settled provider tool streams', () => {
 
   it.each(PROVIDERS)(
     '$name projects the existing final answer without another provider call',
-    async ({ provider, model }) => {
+    async ({ name, provider, model }) => {
       mockCreate
         .mockResolvedValueOnce(response(null, [toolCall('call-1')]))
         .mockResolvedValueOnce(response('final answer'))
@@ -402,7 +402,10 @@ describe('settled provider tool streams', () => {
       expect(result.execution.output).toMatchObject({
         content: 'final answer',
         tokens: { input: 10, output: 6, total: 16 },
-        cost: { input: 1, output: 2, toolCost: 4, total: 7 },
+        cost:
+          name === 'xAI'
+            ? { input: 2, output: 4, toolCost: 4, total: 10 }
+            : { input: 1, output: 2, toolCost: 4, total: 7 },
         toolCalls: { count: 1 },
       })
       expectModelIterations(result, 2)
@@ -411,7 +414,7 @@ describe('settled provider tool streams', () => {
 
   it.each(STRUCTURED_OUTPUT_PROVIDERS)(
     '$name performs deferred structured extraction before projecting a settled stream',
-    async ({ provider, model, responseFormatType, disablesTools }) => {
+    async ({ name, provider, model, responseFormatType, disablesTools }) => {
       mockCreate
         .mockResolvedValueOnce(response(null, [toolCall('call-1')]))
         .mockResolvedValueOnce(response('intermediate answer'))
@@ -435,7 +438,10 @@ describe('settled provider tool streams', () => {
       expect(result.execution.output).toMatchObject({
         content: '{"value":"found"}',
         tokens: { input: 15, output: 9, total: 24 },
-        cost: { input: 1, output: 2, toolCost: 4, total: 7 },
+        cost:
+          name === 'Fireworks'
+            ? { input: 3, output: 6, toolCost: 4, total: 13 }
+            : { input: 1, output: 2, toolCost: 4, total: 7 },
         toolCalls: { count: 1 },
       })
       expectModelIterations(result, 3)
@@ -444,7 +450,7 @@ describe('settled provider tool streams', () => {
 
   it.each(STRUCTURED_OUTPUT_PROVIDERS)(
     '$name makes only one schema-bearing final call when the tool loop reaches its cap',
-    async ({ provider, model, responseFormatType }) => {
+    async ({ name, provider, model, responseFormatType }) => {
       mockCreate
         .mockResolvedValueOnce(response(null, [toolCall('call-1')]))
         .mockResolvedValueOnce(response(null, [toolCall('call-2')]))
@@ -462,7 +468,10 @@ describe('settled provider tool streams', () => {
       expect(result.execution.output).toMatchObject({
         content: '{"value":"capped"}',
         tokens: { input: 15, output: 9, total: 24 },
-        cost: { input: 1, output: 2, toolCost: 4, total: 7 },
+        cost:
+          name === 'Fireworks'
+            ? { input: 3, output: 6, toolCost: 4, total: 13 }
+            : { input: 1, output: 2, toolCost: 4, total: 7 },
       })
       expectModelIterations(result, 3)
     }

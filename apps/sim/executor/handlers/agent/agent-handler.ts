@@ -1282,6 +1282,7 @@ export class AgentBlockHandler implements BlockHandler {
           capabilityPolicy: providerRequest.capabilityPolicy,
           credentialMode: providerRequest.credentialMode,
           providerOptions: providerRequest.providerOptions,
+          providerModel: providerRequest.providerModel,
           // Stable per-block identity; providers use it to route cache lookups.
           blockId: block.id,
           previousInteractionId: providerRequest.previousInteractionId,
