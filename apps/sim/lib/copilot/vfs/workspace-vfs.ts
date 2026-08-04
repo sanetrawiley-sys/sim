@@ -96,6 +96,7 @@ import { BINARY_DOC_TASKS, MAX_DOCUMENT_PREVIEW_CODE_BYTES } from '@/lib/executi
 import { runSandboxTask, SandboxUserCodeError } from '@/lib/execution/sandbox/run-task'
 import { getKnowledgeBases } from '@/lib/knowledge/service'
 import { validateMermaidSource } from '@/lib/mermaid/validate'
+import { verifyEffectiveSuperUser } from '@/lib/permissions/super-user'
 import { getWorkspaceShares } from '@/lib/public-shares/share-manager'
 import { listTables } from '@/lib/table/service'
 import { listWorkspaceFileFolders } from '@/lib/uploads/contexts/workspace/workspace-file-folder-manager'
@@ -201,6 +202,16 @@ function isBinaryDocBuffer(buffer: Buffer, ext: string): boolean {
   return buffer.subarray(0, 2).toString('latin1') === 'PK'
 }
 
+/** Build the lookup shared by cached and per-viewer component serialization. */
+function getVfsToolConfigs(): Map<string, ToolConfig> {
+  const toolConfigs = new Map<string, ToolConfig>()
+  for (const { toolId, config } of getExposedIntegrationTools()) {
+    toolConfigs.set(toolId, config)
+    toolConfigs.set(config.id, config)
+  }
+  return toolConfigs
+}
+
 /**
  * Build the static component files from block and tool registries.
  * This only needs to happen once per process.
@@ -223,11 +234,7 @@ function getStaticComponentFiles(): Map<string, string> {
   const allBlocks = Object.values(BLOCK_REGISTRY)
   const visibleBlocks = allBlocks.filter((b) => !b.hideFromToolbar)
   const exposedTools = getExposedIntegrationTools()
-  const toolConfigs = new Map<string, ToolConfig>()
-  for (const { toolId, config } of exposedTools) {
-    toolConfigs.set(toolId, config)
-    toolConfigs.set(config.id, config)
-  }
+  const toolConfigs = getVfsToolConfigs()
 
   let blocksFiltered = 0
   for (const block of visibleBlocks) {
@@ -489,6 +496,7 @@ export class WorkspaceVFS {
   >()
   private deploymentCache = new Map<string, Promise<DeploymentData | null>>()
   private _workspaceId = ''
+  private _effectiveSuperUser = false
   /**
    * Types of the org's CURRENT custom blocks (enabled + disabled — a disabled block
    * still resolves/renders). Populated by {@link materializeCustomBlocks}; used to
@@ -654,6 +662,7 @@ export class WorkspaceVFS {
     this.deploymentCache = new Map()
     this._customBlockTypes = null
     this._workspaceId = workspaceId
+    this._effectiveSuperUser = false
 
     // Per-phase wall-clock, stamped on the span so a slow materialize in a
     // trace names its bottleneck instead of showing up as unattributed dead
@@ -673,6 +682,19 @@ export class WorkspaceVFS {
         { attributes: { [TraceAttr.WorkspaceId]: workspaceId } },
         async (span) => {
           try {
+            try {
+              const superUser = await timed('super_user', verifyEffectiveSuperUser(userId))
+              this._effectiveSuperUser = superUser.effectiveSuperUser
+            } catch (error) {
+              // Fail closed without making the entire VFS unavailable when the
+              // optional Super User lookup fails.
+              logger.warn('Failed to verify effective Super User for VFS', {
+                workspaceId,
+                userId,
+                error: toError(error).message,
+              })
+            }
+
             const [
               wfSummary,
               kbSummary,
@@ -731,7 +753,17 @@ export class WorkspaceVFS {
             const blockVisibility = overlayVisibility()
             for (const [path, content] of getStaticComponentFiles()) {
               if (isStaticFileHidden(path, blockVisibility)) continue
-              this.files.set(path, content)
+              if (path === 'components/blocks/agent.json' && this._effectiveSuperUser) {
+                this.files.set(
+                  path,
+                  serializeBlockSchema(BLOCK_REGISTRY.agent, {
+                    effectiveSuperUser: true,
+                    toolConfigs: getVfsToolConfigs(),
+                  })
+                )
+              } else {
+                this.files.set(path, content)
+              }
             }
 
             span.setAttributes({
@@ -1360,13 +1392,18 @@ export class WorkspaceVFS {
           // workflow; it still exists and must be readable, so emit an
           // empty-but-valid state.json rather than a 404.
           const sanitized = normalized
-            ? sanitizeForCopilot({
-                blocks: normalized.blocks,
-                edges: normalized.edges,
-                loops: normalized.loops,
-                parallels: normalized.parallels,
-              } as any)
-            : sanitizeForCopilot({ blocks: {}, edges: [], loops: {}, parallels: {} } as any)
+            ? sanitizeForCopilot(
+                {
+                  blocks: normalized.blocks,
+                  edges: normalized.edges,
+                  loops: normalized.loops,
+                  parallels: normalized.parallels,
+                } as any,
+                { effectiveSuperUser: this._effectiveSuperUser }
+              )
+            : sanitizeForCopilot({ blocks: {}, edges: [], loops: {}, parallels: {} } as any, {
+                effectiveSuperUser: this._effectiveSuperUser,
+              })
           return JSON.stringify(sanitized, null, 2)
         })
 

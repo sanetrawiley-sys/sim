@@ -7,6 +7,7 @@ import {
   evaluateSubBlockCondition,
 } from '@/lib/workflows/subblocks/visibility'
 import { getBlock } from '@/blocks/registry'
+import { redactCustomModelConfig } from '@/providers/custom-model'
 import type { BlockState, Loop, Parallel, WorkflowState } from '@/stores/workflows/workflow/types'
 import { generateLoopBlocks, generateParallelBlocks } from '@/stores/workflows/workflow/utils'
 import { TRIGGER_WEBHOOK_URL_FIELD } from '@/triggers/constants'
@@ -271,7 +272,8 @@ function isToolInput(value: unknown): value is ToolInput {
  */
 function sanitizeSubBlocks(
   subBlocks: BlockState['subBlocks'],
-  hiddenIds: ReadonlySet<string>
+  hiddenIds: ReadonlySet<string>,
+  effectiveSuperUser: boolean
 ): Record<string, string | number | string[][] | object> {
   const sanitized: Record<string, string | number | string[][] | object> = {}
 
@@ -280,6 +282,14 @@ function sanitizeSubBlocks(
 
     // Skip null/undefined values
     if (subBlock.value === null || subBlock.value === undefined) {
+      return
+    }
+
+    // The custom model contract is useful to Mothership only for a verified
+    // Super User. Preserve environment references, but never expose a resolved
+    // or literal provider key in workflow state.
+    if (key === 'customModelConfig' && effectiveSuperUser) {
+      sanitized[key] = redactCustomModelConfig(subBlock.value) as string | object
       return
     }
 
@@ -519,7 +529,16 @@ function extractConnectionsForBlock(
  * Sanitize workflow state for copilot by removing all UI-specific data
  * Creates nested structure for loops/parallels with their child blocks inside
  */
-export function sanitizeForCopilot(state: WorkflowState): CopilotWorkflowState {
+export interface CopilotSanitizationOptions {
+  /** Super-user-only fields remain hidden unless explicitly enabled by a verified caller. */
+  effectiveSuperUser?: boolean
+}
+
+export function sanitizeForCopilot(
+  state: WorkflowState,
+  options: CopilotSanitizationOptions = {}
+): CopilotWorkflowState {
+  const effectiveSuperUser = options.effectiveSuperUser === true
   const sanitizedBlocks: Record<string, CopilotBlockState> = {}
   const processedBlocks = new Set<string>()
 
@@ -574,10 +593,13 @@ export function sanitizeForCopilot(state: WorkflowState): CopilotWorkflowState {
       // For regular blocks, sanitize subBlocks
       const hiddenIds = new Set(
         (getBlock(block.type)?.subBlocks ?? [])
-          .filter((subBlock) => subBlock.hideFromCopilot)
+          .filter(
+            (subBlock) =>
+              subBlock.hideFromCopilot || (subBlock.superUserOnly && !effectiveSuperUser)
+          )
           .map((subBlock) => subBlock.id)
       )
-      inputs = sanitizeSubBlocks(block.subBlocks, hiddenIds)
+      inputs = sanitizeSubBlocks(block.subBlocks, hiddenIds, effectiveSuperUser)
 
       const webhookUrl = resolveTriggerWebhookUrl(blockId, block)
       if (webhookUrl) {
